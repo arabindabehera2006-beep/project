@@ -1,0 +1,18 @@
+flask>=3.0.0
+streamlit>=1.40.0
+requests>=2.32.0
+pillow>=10.0.0
+numpy>=1.26.0
+gTTS>=2.5.0
+pytesseract>=0.3.13
+pypdf>=5.0.0
+SpeechRecognition>=3.10.0
+audioop-lts>=0.2.1
+langchain-core>=0.3.0
+torch>=2.2.0
+python-dotenv>=1.0.0
+groq>=0.11.0
+httpx>=0.28,<1
+selenium>=4.20.0
+# googletrans==4.0.0rc1 is already installed with --no-deps.
+# Its published pin httpx==0.13.3 does not run on Python 3.13.
