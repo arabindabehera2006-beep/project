@@ -485,6 +485,233 @@ def metric_card(label: str, value: str) -> None:
     )
 
 
+# gTTS codes live here because Streamlit Cloud runs this file alone.
+SPEECH_CODES = {
+    "english": "en",
+    "hindi": "hi",
+    "bengali": "bn",
+    "bangla": "bn",
+    "tamil": "ta",
+    "telugu": "te",
+    "marathi": "mr",
+    "gujarati": "gu",
+    "kannada": "kn",
+    "malayalam": "ml",
+    "punjabi": "pa",
+    "urdu": "ur",
+    "nepali": "ne",
+    "odia": "or",
+    "oriya": "or",
+    "assamese": "as",
+    "sanskrit": "sa",
+    "sindhi": "sd",
+    "sinhala": "si",
+    "sinhalese": "si",
+}
+
+
+def clean_translation(raw: str) -> str:
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:\w+)?", "", text).strip()
+        text = re.sub(r"```$", "", text).strip()
+    text = re.sub(r"^(translation|translated text)\s*:\s*", "", text, flags=re.IGNORECASE)
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+        text = text[1:-1].strip()
+    return text
+
+
+def has_target_script(text: str, language_name: str) -> bool:
+    if language_name.strip().lower() in {"", "english"}:
+        return True
+    letters = [ch for ch in text if ch.isalpha()]
+    if not letters:
+        return False
+    other = sum(1 for ch in letters if ord(ch) > 127)
+    return other >= 8 or other / len(letters) >= 0.25
+
+
+def native_paragraphs(text: str, language_name: str) -> str:
+    parts = [part.strip() for part in re.split(r"\n+", text) if part.strip()]
+    native = [part for part in parts if has_target_script(part, language_name)]
+    if native:
+        return "\n".join(native)
+    return text.strip()
+
+
+def target_language_name(language: str, regional_name: str = "") -> str:
+    if language == "Other regional language":
+        return (regional_name or "").strip()
+    return (language or "").strip()
+
+
+def groq_api_key() -> str:
+    key = os.getenv("GROQ_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(Path(__file__).resolve().parent / ".env")
+    except Exception:
+        pass
+    key = os.getenv("GROQ_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        return str(st.secrets.get("GROQ_API_KEY", "")).strip()
+    except Exception:
+        return ""
+
+
+def groq_model_name() -> str:
+    chosen = os.getenv("GROQ_ANSWER_MODEL", "").strip()
+    if chosen:
+        return chosen
+    configured = os.getenv("GROQ_MODEL", "").strip()
+    blocked = ("prompt-guard", "whisper", "orpheus", "safeguard")
+    if configured and not any(part in configured for part in blocked):
+        return configured
+    if hasattr(backend, "groq_answer_model"):
+        try:
+            return backend.groq_answer_model()
+        except Exception:
+            pass
+    return "openai/gpt-oss-20b"
+
+
+def gtts_codes() -> dict[str, str]:
+    try:
+        from gtts.lang import tts_langs
+
+        return tts_langs()
+    except Exception:
+        return {}
+
+
+def speech_code(language: str, regional_name: str = "") -> str | None:
+    name = target_language_name(language, regional_name).strip().lower()
+    if not name:
+        return None
+    code = SPEECH_CODES.get(name)
+    supported = gtts_codes()
+    if code and (not supported or code in supported):
+        return code
+    for label, lang_code in supported.items():
+        if label.lower() == name or label.lower().startswith(name + " "):
+            return lang_code
+    return None
+
+
+def translate_with_groq(text: str, language_name: str) -> str:
+    cleaned = (text or "").strip()
+    target = (language_name or "").strip()
+    if not cleaned or not target:
+        return cleaned
+    api_key = groq_api_key()
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY is not set")
+    from groq import Groq
+
+    prompts = (
+        (
+            f"Translate the user text into {target}. "
+            "Use the usual script for that language. "
+            "Keep medicine names as they are commonly written. "
+            "Return only the translation."
+        ),
+        (
+            f"Write the same meaning in {target} only. "
+            "Use its native script. Do not include English sentences."
+        ),
+    )
+    client = Groq(api_key=api_key)
+    for prompt in prompts:
+        response = client.chat.completions.create(
+            model=groq_model_name(),
+            temperature=0,
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": cleaned},
+            ],
+        )
+        translated = native_paragraphs(clean_translation(response.choices[0].message.content or ""), target)
+        if translated and has_target_script(translated, target):
+            return translated
+    raise RuntimeError("Translation did not come back in the selected language")
+
+
+def speak_message(message: str, lang: str) -> str:
+    from gtts import gTTS
+
+    buffer = BytesIO()
+    gTTS(text=message, lang=lang).write_to_fp(buffer)
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def attach_audio(result: dict, message: str, lang: str, note: str) -> None:
+    result["tts_language"] = lang
+    result["audio_note"] = note
+    result["audio_mime"] = "audio/mp3"
+    result["tts_engine"] = "gTTS"
+    try:
+        result["audio_base64"] = speak_message(message, lang)
+    except Exception:
+        result["audio_base64"] = ""
+        if not note:
+            result["audio_note"] = "Audio could not be created. The written message is still shown."
+
+
+def localize_result(result: dict) -> dict:
+    """Translate and speak here, so deploying app.py covers every listed language."""
+    if result.get("_localized"):
+        return result
+    language = result.get("language") or "English"
+    regional = result.get("regional_language_name") or ""
+    name = target_language_name(language, regional)
+    message = (result.get("patient_message") or "").strip()
+    result["_localized"] = True
+    if not message:
+        return result
+    if not name or name.lower() == "english":
+        if not result.get("audio_base64"):
+            attach_audio(result, message, "en", "")
+        return result
+
+    code = speech_code(language, regional)
+    if not has_target_script(message, name):
+        try:
+            message = translate_with_groq(message, name)
+            result["patient_message"] = message
+        except Exception as exc:
+            result["patient_translation"] = {
+                "status": "error",
+                "engine": "Groq",
+                "detail": exc.__class__.__name__,
+            }
+            attach_audio(result, result.get("patient_message") or message, "en", "Translation failed, so the audio is English.")
+            return result
+
+    if not code:
+        result["patient_translation"] = {
+            "status": "ok",
+            "engine": "Groq",
+            "dest": "",
+            "detail": "Selected language is shown as text.",
+        }
+        result["audio_base64"] = ""
+        result["tts_language"] = ""
+        result["audio_note"] = "This language is shown as text. Audio is not available for that voice."
+        return result
+
+    result["patient_translation"] = {"status": "ok", "engine": "Groq", "dest": code, "detail": ""}
+    if result.get("tts_language") == code and result.get("audio_base64") and has_target_script(message, name):
+        result["audio_note"] = ""
+        return result
+    attach_audio(result, message, code, "")
+    return result
+
+
 def render_audio(result: dict) -> None:
     audio = result.get("audio_base64") or ""
     note = (result.get("audio_note") or "").strip()
@@ -689,6 +916,8 @@ def render_result(result: dict, key_prefix: str = "main") -> None:
 def show_result(result, key_prefix: str = "main") -> None:
     if not result:
         return
+    if isinstance(result, dict):
+        localize_result(result)
     try:
         render_result(result, key_prefix)
     except Exception as exc:
@@ -739,7 +968,7 @@ def submit_case(symptoms: str, language: str, regional_name: str, voice, report,
         if payload.get("detail"):
             st.caption(str(payload["detail"]))
         return None
-    return payload
+    return localize_result(payload)
 
 
 st.markdown(
@@ -807,8 +1036,11 @@ with patient_tab:
             if hasattr(st, "audio_input"):
                 voice = st.audio_input("Record speech", key="patient_speech")
             else:
-                voice = None
-                st.caption("Restart with: python app.py")
+                voice = st.file_uploader(
+                    "Upload speech",
+                    type=["wav", "mp3", "m4a", "flac", "aiff", "aif"],
+                    key="patient_speech_file",
+                )
         with pdf_col:
             st.markdown("**PDF report**")
             report = st.file_uploader(
