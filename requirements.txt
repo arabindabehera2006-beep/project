@@ -1,5 +1,5 @@
 flask>=3.0.0
-streamlit>=1.40.0
+streamlit>=1.43.0
 requests>=2.32.0
 pillow>=10.0.0
 numpy>=1.26.0
@@ -14,5 +14,3 @@ python-dotenv>=1.0.0
 groq>=0.11.0
 httpx>=0.28,<1
 selenium>=4.20.0
-# googletrans==4.0.0rc1 is already installed with --no-deps.
-# Its published pin httpx==0.13.3 does not run on Python 3.13.
